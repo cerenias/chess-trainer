@@ -406,13 +406,13 @@ header {
   <div class="logo">♟ Chess Opening Trainer</div>
   <div class="hdr-btns">
     <button class="btn btn-gold" id="flip-btn">⟲ Flip</button>
-    <button class="btn" id="key-btn">⚙ API Key</button>
+    <button class="btn" id="key-btn">⚙ Access</button>
   </div>
 </header>
 
 <div id="api-bar">
-  <label for="api-key-input">Anthropic API Key:</label>
-  <input type="password" id="api-key-input" placeholder="sk-ant-..." spellcheck="false" autocomplete="off">
+  <label for="api-key-input">Access password:</label>
+  <input type="password" id="api-key-input" placeholder="password from your invite" spellcheck="false" autocomplete="off">
   <button class="btn" id="save-key-btn">Save</button>
   <span id="key-status"></span>
 </div>
@@ -496,6 +496,7 @@ const PIECES = {
 };
 const SQ = 60; // viewBox px per square
 const MAX_LINE_MOVES = 20; // cap on how deep "Analyze further moves" can go
+const WORKER_URL = 'https://chess-api.cerenias.workers.dev'; // shared API proxy
 
 // UCI rank order for first moves (by opening theory relevance)
 const FIRST_MOVE_RANK = {
@@ -510,7 +511,7 @@ const FIRST_MOVE_RANK = {
 //  State
 // ─────────────────────────────────────────────
 const S = {
-  apiKey: (() => { try { return sessionStorage.getItem('cot_key') || ''; } catch(e) { return ''; } })(),
+  apiKey: (() => { try { return localStorage.getItem('cot_pass') || ''; } catch(e) { return ''; } })(),
   active: false,        // true once an opening lesson is in progress
   opening: '',
   description: '',
@@ -1047,17 +1048,15 @@ function validateCandidates(fen, cands) {
 //  API
 // ─────────────────────────────────────────────
 async function apiFetch(content, max_tokens = 3200) {
-  if (!S.apiKey) throw new Error('No API key set — click ⚙ API Key and save your key first.');
+  if (!S.apiKey) throw new Error('Enter the access password first (⚙ Access).');
 
   let res;
   try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
+    res = await fetch(WORKER_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': S.apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
+        'X-App-Pass': S.apiKey,
       },
       body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens, messages: [{ role: 'user', content }] })
     });
@@ -1136,7 +1135,7 @@ Under 150 words, for an improving club player.`, 600
 
 // First move clicked on exploration board
 async function handleExplorationClick(node) {
-  if (!S.apiKey) { toast('Enter your Anthropic API key first (⚙ API Key).'); return; }
+  if (!S.apiKey) { toast('Enter the access password first (⚙ Access).'); return; }
   if (S.phase !== 'exploring') return;
 
   // Play the move immediately for visual feedback
@@ -1538,21 +1537,21 @@ function updatePanel() {
 // ─────────────────────────────────────────────
 function updateKeyStatus() {
   const el = document.getElementById('key-status');
-  el.textContent = S.apiKey ? '✓ Saved for session' : 'No key set';
+  el.textContent = S.apiKey ? '✓ Saved on this device' : 'No password set';
   el.style.color = S.apiKey ? '#27ae60' : '#c0392b';
 }
 
 function init() {
   S.explMoves = buildExplorationMoves();
 
-  // API key
+  // Access password
   document.getElementById('api-key-input').value = S.apiKey;
   updateKeyStatus();
   if (S.apiKey) document.getElementById('api-bar').style.display = 'none';
 
   document.getElementById('save-key-btn').addEventListener('click', () => {
     S.apiKey = document.getElementById('api-key-input').value.trim();
-    try { sessionStorage.setItem('cot_key', S.apiKey); } catch(e) {}
+    try { localStorage.setItem('cot_pass', S.apiKey); } catch(e) {}
     updateKeyStatus();
   });
   document.getElementById('api-key-input').addEventListener('keydown', e => {
