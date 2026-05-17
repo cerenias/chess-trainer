@@ -163,7 +163,9 @@ header {
   display: block;
   border-radius: 2px;
   box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  touch-action: none;          /* drag pieces without scrolling the page */
 }
+#board-svg.dragging { cursor: grabbing; }
 #board-label {
   font-family: 'JetBrains Mono', monospace;
   font-size: .75rem;
@@ -676,7 +678,10 @@ function renderBoard() {
       const isW = pc.color === 'w';
 
       const pcId = 'pc-' + pc.color + pc.type.toUpperCase();
-      const useEl = svgEl('use', { href: '#' + pcId, x, y, width: SQ, height: SQ });
+      const useEl = svgEl('use', {
+        href: '#' + pcId, x, y, width: SQ, height: SQ,
+        'data-sq': sq, 'data-color': pc.color
+      });
       svg.appendChild(useEl);
     }
   }
@@ -716,7 +721,7 @@ function renderBoard() {
   if (S.active) {
     lbl.textContent = S.opening;
   } else {
-    lbl.textContent = 'Click any move to begin';
+    lbl.textContent = 'Drag or click a move to begin';
   }
 
   renderEvalBar();
@@ -1447,7 +1452,7 @@ function updatePanel() {
     el.innerHTML = `
       <div style="margin-bottom:18px">
         <div style="font-family:'Playfair Display',serif;font-size:1.2rem;color:var(--gold);margin-bottom:8px">Choose your first move</div>
-        <p class="explore-msg">Every lettered square on the board is a legal opening move. Click one to start — the trainer identifies the opening and teaches the theory one move at a time.</p>
+        <p class="explore-msg">Every lettered square is a legal opening move. Drag the piece to it (or click the letter) to start — the trainer identifies the opening and teaches the theory one move at a time.</p>
       </div>
       <div style="margin-bottom:6px;font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)">Move quality</div>
       <div class="legend-row"><div class="legend-dot" style="background:#27ae60"></div>A – D &nbsp;Main opening moves</div>
@@ -1541,8 +1546,141 @@ function updateKeyStatus() {
   el.style.color = S.apiKey ? '#27ae60' : '#c0392b';
 }
 
+// ─────────────────────────────────────────────
+//  Drag to move (added alongside click — both work)
+// ─────────────────────────────────────────────
+function setupDrag() {
+  const svg = document.getElementById('board-svg');
+  let pend = null;          // { pointerId, fromSq, x0, y0, started, ghost, orig }
+  let suppressClick = false;
+
+  const sqFromClient = (cx, cy) => {
+    const r = svg.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const fx = (cx - r.left) / r.width, fy = (cy - r.top) / r.height;
+    if (fx < 0 || fx >= 1 || fy < 0 || fy >= 1) return null;
+    const col = Math.min(7, Math.floor(fx * 8));
+    const row = Math.min(7, Math.floor(fy * 8));
+    const fl = S.flipped;
+    const file = fl ? 7 - col : col;
+    const rank = fl ? row + 1 : 8 - row;
+    return String.fromCharCode(97 + file) + rank;
+  };
+  const svgPt = (cx, cy) => {
+    const r = svg.getBoundingClientRect();
+    return { x: ((cx - r.left) / r.width) * 480, y: ((cy - r.top) / r.height) * 480 };
+  };
+  const draggableAt = (sq) => {
+    if (S.phase === 'exploring')
+      return S.explMoves.some(m => m.uci.slice(0, 2) === sq);
+    if (S.phase === 'student_turn') {
+      const pc = S.chess.get(sq);
+      return !!pc && pc.color === S.chess.turn();
+    }
+    return false;
+  };
+  const legalTargets = (from) => {
+    if (S.phase === 'exploring')
+      return S.explMoves.filter(m => m.uci.slice(0, 2) === from)
+                        .map(m => m.uci.slice(2, 4));
+    return S.chess.moves({ square: from, verbose: true }).map(m => m.to);
+  };
+
+  svg.addEventListener('pointerdown', e => {
+    if (e.button && e.button !== 0) return;
+    const sq = sqFromClient(e.clientX, e.clientY);
+    if (!sq || !draggableAt(sq)) return;          // not a piece we can drag
+    pend = { pointerId: e.pointerId, fromSq: sq,
+             x0: e.clientX, y0: e.clientY, started: false };
+  });
+
+  svg.addEventListener('pointermove', e => {
+    if (!pend || e.pointerId !== pend.pointerId) return;
+    if (!pend.started) {
+      if (Math.hypot(e.clientX - pend.x0, e.clientY - pend.y0) < 6) return;
+      pend.started = true;
+      try { svg.setPointerCapture(pend.pointerId); } catch (x) {}
+      svg.classList.add('dragging');
+      const fl = S.flipped;
+      // highlight origin + legal destinations
+      const o = sqXY(pend.fromSq, fl);
+      svg.appendChild(svgEl('rect', {
+        x: o.x, y: o.y, width: SQ, height: SQ,
+        fill: 'rgba(246,246,105,.40)', 'pointer-events': 'none'
+      }));
+      for (const t of legalTargets(pend.fromSq)) {
+        const c = sqXY(t, fl);
+        svg.appendChild(svgEl('circle', {
+          cx: c.x + SQ / 2, cy: c.y + SQ / 2, r: 9,
+          fill: 'rgba(0,0,0,.22)', 'pointer-events': 'none'
+        }));
+      }
+      pend.orig = svg.querySelector(`use[data-sq="${pend.fromSq}"]`);
+      if (pend.orig) pend.orig.setAttribute('visibility', 'hidden');
+      pend.ghost = svgEl('use', {
+        href: pend.orig ? pend.orig.getAttribute('href') : '#pc-wP',
+        width: SQ, height: SQ, 'pointer-events': 'none'
+      });
+      svg.appendChild(pend.ghost);
+    }
+    const p = svgPt(e.clientX, e.clientY);
+    pend.ghost.setAttribute('x', p.x - SQ / 2);
+    pend.ghost.setAttribute('y', p.y - SQ / 2);
+    e.preventDefault();
+  });
+
+  const endDrag = async (e) => {
+    if (!pend || e.pointerId !== pend.pointerId) return;
+    const wasDrag = pend.started;
+    const from = pend.fromSq;
+    try { svg.releasePointerCapture(pend.pointerId); } catch (x) {}
+    svg.classList.remove('dragging');
+    pend = null;
+    if (!wasDrag) return;                 // a tap → let the click handlers run
+
+    // A real drag happened: swallow the click that follows so it can't
+    // double-trigger a move via the existing click handlers.
+    suppressClick = true;
+    setTimeout(() => { suppressClick = false; }, 400);
+
+    const to = sqFromClient(e.clientX, e.clientY);
+    if (!to || to === from) { renderBoard(); return; }
+
+    if (S.phase === 'exploring') {
+      const m = S.explMoves.find(x =>
+        x.uci.slice(0, 2) === from && x.uci.slice(2, 4) === to);
+      if (m) handleExplorationClick(m); else renderBoard();
+      return;
+    }
+    if (S.phase === 'student_turn') {
+      const pos = getPos(S.chess.fen());
+      const cand = pos && pos.candidates &&
+        pos.candidates.find(c =>
+          c.uci.slice(0, 2) === from && c.uci.slice(2, 4) === to);
+      if (cand) { handleCandidateClick(cand); return; }
+      const ok = await playOffBook(from, to);
+      if (!ok) renderBoard();
+      return;
+    }
+    renderBoard();
+  };
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+
+  // Capture-phase: kill the synthetic click that follows a real drag,
+  // before it reaches the square/arrow click handlers.
+  svg.addEventListener('click', e => {
+    if (suppressClick) {
+      suppressClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  }, true);
+}
+
 function init() {
   S.explMoves = buildExplorationMoves();
+  setupDrag();
 
   // Access password
   document.getElementById('api-key-input').value = S.apiKey;
