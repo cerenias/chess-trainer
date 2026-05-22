@@ -413,8 +413,8 @@ header {
 </header>
 
 <div id="api-bar">
-  <label for="api-key-input">Access password:</label>
-  <input type="password" id="api-key-input" placeholder="password from your invite" spellcheck="false" autocomplete="off">
+  <label for="api-key-input">Password (for Explain &amp; AI analysis):</label>
+  <input type="password" id="api-key-input" placeholder="optional — only needed for AI features" spellcheck="false" autocomplete="off">
   <button class="btn" id="save-key-btn">Save</button>
   <span id="key-status"></span>
 </div>
@@ -1135,12 +1135,81 @@ Under 150 words, for an improving club player.`, 600
 }
 
 // ─────────────────────────────────────────────
+//  Lichess proxy helpers (free, no password)
+// ─────────────────────────────────────────────
+const CACHE_VERSION = '2'; // bump whenever cache format changes
+function initCache() {
+  try {
+    if (localStorage.getItem('cot_cache_version') !== CACHE_VERSION) {
+      Object.keys(localStorage)
+        .filter(k => k.startsWith('cot_pos_') || k.startsWith('cot_open_'))
+        .forEach(k => localStorage.removeItem(k));
+      localStorage.setItem('cot_cache_version', CACHE_VERSION);
+    }
+  } catch (e) {}
+}
+
+async function lichessProxyFetch(fen, db) {
+  db = db || 'masters';
+  let res;
+  try {
+    res = await fetch(WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lichess: { fen, db } })
+    });
+  } catch (netErr) {
+    throw new Error('Network error — check your connection. (' + netErr.message + ')');
+  }
+  if (!res.ok) throw new Error('Lichess proxy error: HTTP ' + res.status);
+  return res.json();
+}
+
+function lichessWhitePct(data) {
+  const total = (data.white || 0) + (data.draws || 0) + (data.black || 0);
+  if (!total) return 50;
+  return Math.round(((data.white || 0) + (data.draws || 0) * 0.5) / total * 100);
+}
+
+function lichessDescription(data) {
+  const total = (data.white || 0) + (data.draws || 0) + (data.black || 0);
+  if (!total) return '';
+  const w = Math.round((data.white || 0) / total * 100);
+  const d = Math.round((data.draws || 0) / total * 100);
+  const b = 100 - w - d;
+  return total.toLocaleString() + ' games · White ' + w + '% / Draw ' + d + '% / Black ' + b + '%';
+}
+
+function lichessMovesToCandidates(moves, totalGames) {
+  const LABELS = ['A', 'B', 'C', 'a', 'b', 'c'];
+  const threshold = Math.max(5, totalGames * 0.005);
+  const filtered = (moves || [])
+    .filter(m => (m.white + m.draws + m.black) >= threshold)
+    .slice(0, 5);
+  const bestCount = Math.min(3, Math.ceil(filtered.length / 2));
+  return filtered.map((m, i) => {
+    const mgames = m.white + m.draws + m.black;
+    const pct = totalGames ? Math.round(mgames / totalGames * 100) : 0;
+    const quality = i < bestCount ? 'best' : 'ok';
+    const parts = [];
+    if (m.opening && m.opening.name) parts.push(m.opening.name);
+    parts.push(pct + '% of games');
+    return {
+      uci: m.uci,
+      move: m.san,
+      quality,
+      label: LABELS[i] || '?',
+      explanation: parts.join(' · ')
+    };
+  });
+}
+
+// ─────────────────────────────────────────────
 //  Game flow
 // ─────────────────────────────────────────────
 
 // First move clicked on exploration board
 async function handleExplorationClick(node) {
-  if (!S.apiKey) { toast('Enter the access password first (⚙ Access).'); return; }
   if (S.phase !== 'exploring') return;
 
   // Play the move immediately for visual feedback
@@ -1152,7 +1221,7 @@ async function handleExplorationClick(node) {
   S.history = [{
     uci: node.uci, san: result.san,
     quality: 'best', label: node.label,
-    explanation: `Opening move: 1.${result.san}`,
+    explanation: 'Opening move: 1.' + result.san,
     isPunishment: false
   }];
   S.mistakeNode = null;
@@ -1164,7 +1233,7 @@ async function handleExplorationClick(node) {
   if (meta && getPos(fen)) {
     S.opening = meta.opening;
     S.description = meta.description;
-    S.perspective = meta.perspective;
+    S.perspective = meta.perspective || 'white';
     S.active = true;
     document.getElementById('panel-actions').style.display = 'flex';
     document.getElementById('mistake-panel').classList.remove('show');
@@ -1173,21 +1242,22 @@ async function handleExplorationClick(node) {
   }
 
   S.phase = 'loading';
-  setLoading(true, `Analysing 1.${result.san}…`);
+  setLoading(true, 'Looking up 1.' + result.san + '…');
   renderBoard(); updatePanel();
 
   try {
-    const raw = await fetchPosition(fen, sanLine(), true);
-    S.opening = raw.opening || `1.${result.san} Opening`;
-    S.description = raw.description || '';
-    S.perspective = (raw.perspective === 'black') ? 'black' : 'white';
-    saveOpeningMeta(node.uci, {
-      opening: S.opening, description: S.description, perspective: S.perspective
-    });
+    const raw = await lichessProxyFetch(fen);
+    const total = (raw.white || 0) + (raw.draws || 0) + (raw.black || 0);
+    const openingName = (raw.opening && raw.opening.name) || ('1.' + result.san + ' Opening');
+    const desc = lichessDescription(raw);
+    S.opening = openingName;
+    S.description = desc;
+    S.perspective = 'white';
+    saveOpeningMeta(node.uci, { opening: openingName, description: desc, perspective: 'white' });
     putPos(fen, {
-      candidates: validateCandidates(fen, raw.candidates),
-      continuation: raw.continuation || null,
-      whitePct: clampPct(raw.whiteWinPct)
+      candidates: validateCandidates(fen, lichessMovesToCandidates(raw.moves || [], total)),
+      continuation: null,
+      whitePct: lichessWhitePct(raw)
     });
     S.active = true;
     setLoading(false);
@@ -1200,14 +1270,13 @@ async function handleExplorationClick(node) {
     S.phase = 'exploring';
     setLoading(false);
     renderBoard(); updatePanel();
-    toast('Error: ' + (err.message || String(err)) +
-      '\n\n(Check browser console for details — open DevTools with ⌥⌘I)');
-    console.error('fetchPosition failed:', err);
+    toast('Error: ' + (err.message || String(err)));
+    console.error('lichess fetch failed:', err);
   }
 }
 
 // Auto-expand: show candidates for the current position, fetching them
-// lazily (and caching) only if this exact position hasn't been analysed yet.
+// lazily (and caching) only if this exact position hasn't been looked up yet.
 async function advance() {
   S.selectedSq = null;
   const fen = S.chess.fen();
@@ -1215,22 +1284,30 @@ async function advance() {
 
   if (!data) {
     S.phase = 'loading';
-    setLoading(true, 'Analysing next move…');
+    setLoading(true, 'Checking the masters database…');
     renderBoard(); updatePanel();
     try {
-      const raw = await fetchPosition(fen, sanLine(), false);
+      const raw = await lichessProxyFetch(fen);
+      const total = (raw.white || 0) + (raw.draws || 0) + (raw.black || 0);
+      // Update opening name as theory deepens (Lichess refines it move by move)
+      if (raw.opening && raw.opening.name) {
+        S.opening = raw.opening.name;
+        S.description = lichessDescription(raw);
+        if (S.openingMoveUci) saveOpeningMeta(S.openingMoveUci, {
+          opening: S.opening, description: S.description, perspective: S.perspective
+        });
+      }
       data = {
-        candidates: validateCandidates(fen, raw.candidates),
-        continuation: raw.continuation || null,
-        whitePct: clampPct(raw.whiteWinPct)
+        candidates: validateCandidates(fen, lichessMovesToCandidates(raw.moves || [], total)),
+        continuation: null,
+        whitePct: lichessWhitePct(raw)
       };
       putPos(fen, data);
     } catch (err) {
       setLoading(false);
-      // Stay on the last move; the user can step Back or try again.
       S.phase = 'complete';
       updatePanel(); renderBoard();
-      toast('Could not analyse this position: ' + (err.message || String(err)));
+      toast('Could not fetch moves: ' + (err.message || String(err)));
       console.error('advance fetch failed:', err);
       return;
     }
@@ -1241,7 +1318,10 @@ async function advance() {
     S.phase = 'student_turn';
   } else {
     S.phase = 'complete';
-    ensureContinuation(fen, data);
+    if (!data.continuation) {
+      data.continuation = 'End of theory in the Lichess masters database. Use “Analyze further moves” for AI guidance on this position (access password required), or use ← Back to explore other variations.';
+      putPos(fen, data);
+    }
   }
   updatePanel(); renderBoard();
 }
@@ -1379,11 +1459,15 @@ function navigateBack() {
   renderBoard();
 }
 
-// Force-fetch moves for a position the model marked "end of theory".
+// Force-fetch moves for a position past the Lichess database — uses Claude.
 async function analyzeFurther() {
   if (!S.active) return;
+  if (!S.apiKey) {
+    toast('Enter the access password (⚙ Access) to analyze further with AI.');
+    return;
+  }
   if (Math.ceil(S.history.length / 2) >= MAX_LINE_MOVES) {
-    toast(`Reached the ${MAX_LINE_MOVES}-move analysis limit for this line.`);
+    toast('Reached the ' + MAX_LINE_MOVES + '-move analysis limit for this line.');
     return;
   }
   const fen = S.chess.fen();
@@ -1452,7 +1536,7 @@ function updatePanel() {
     el.innerHTML = `
       <div style="margin-bottom:18px">
         <div style="font-family:'Playfair Display',serif;font-size:1.2rem;color:var(--gold);margin-bottom:8px">Choose your first move</div>
-        <p class="explore-msg">Every lettered square is a legal opening move. Drag the piece to it (or click the letter) to start — the trainer identifies the opening and teaches the theory one move at a time.</p>
+        <p class="explore-msg">Every lettered square is a legal opening move. Drag the piece to it (or click the letter) to start — opening names and move statistics come from the Lichess masters database. No password needed to browse.</p>
       </div>
       <div style="margin-bottom:6px;font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)">Move quality</div>
       <div class="legend-row"><div class="legend-dot" style="background:#27ae60"></div>A – D &nbsp;Main opening moves</div>
@@ -1679,6 +1763,7 @@ function setupDrag() {
 }
 
 function init() {
+  initCache();
   S.explMoves = buildExplorationMoves();
   setupDrag();
 
@@ -1712,9 +1797,13 @@ function init() {
   document.getElementById('explore-btn').addEventListener('click', backToExploration);
   document.getElementById('punish-btn').addEventListener('click', playPunishment);
 
-  // Explain position
+  // Explain position (requires password — uses Claude)
   document.getElementById('explain-btn').addEventListener('click', async () => {
     if (!S.active) return;
+    if (!S.apiKey) {
+      toast('Enter the access password (⚙ Access) to use the AI explanation.');
+      return;
+    }
     const modal = document.getElementById('explain-modal');
     modal.classList.add('show');
     document.getElementById('modal-body').textContent = 'Loading…';
@@ -1722,8 +1811,8 @@ function init() {
       const last = S.history.length ? S.history[S.history.length - 1].san : 'the starting position';
       const text = await fetchExplanation(S.opening, last, S.chess.fen());
       document.getElementById('modal-body').textContent = text;
-    } catch {
-      document.getElementById('modal-body').textContent = 'Unable to fetch explanation.';
+    } catch (err) {
+      document.getElementById('modal-body').textContent = 'Unable to fetch explanation: ' + (err.message || String(err));
     }
   });
   document.getElementById('modal-close-btn').addEventListener('click', () => {
