@@ -1797,20 +1797,31 @@ function init() {
   document.getElementById('explore-btn').addEventListener('click', backToExploration);
   document.getElementById('punish-btn').addEventListener('click', playPunishment);
 
-  // Explain position (requires password — uses Claude)
+  // Explain position (requires password — uses Claude; result cached per position)
   document.getElementById('explain-btn').addEventListener('click', async () => {
     if (!S.active) return;
     if (!S.apiKey) {
       toast('Enter the access password (⚙ Access) to use the AI explanation.');
       return;
     }
+    const fen = S.chess.fen();
     const modal = document.getElementById('explain-modal');
     modal.classList.add('show');
+    // Check cache first
+    const cached = getPos(fen);
+    if (cached && cached.explanation) {
+      document.getElementById('modal-body').textContent = cached.explanation;
+      return;
+    }
     document.getElementById('modal-body').textContent = 'Loading…';
     try {
       const last = S.history.length ? S.history[S.history.length - 1].san : 'the starting position';
-      const text = await fetchExplanation(S.opening, last, S.chess.fen());
+      const text = await fetchExplanation(S.opening, last, fen);
       document.getElementById('modal-body').textContent = text;
+      // Save to position cache so next click is instant
+      const data = getPos(fen) || {};
+      data.explanation = text;
+      putPos(fen, data);
     } catch (err) {
       document.getElementById('modal-body').textContent = 'Unable to fetch explanation: ' + (err.message || String(err));
     }
